@@ -39,3 +39,9 @@
 - `data/external/`：放外部參考資料
 - `data/templates/`：放資料模板
 - `results/`：放圖表、表格與研究輸出
+
+## 環境設定
+
+- 本專案使用根目錄 `.env` 儲存敏感或機器相關設定（例如 `SEC_USER_AGENT`）。
+- `.env` 已在 `.gitignore` 中排除，不會被提交到 Git。
+- 可先複製 `.env.example` 成 `.env`，再填入你的設定值。
