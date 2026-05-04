@@ -1,6 +1,6 @@
 # 研究進度追蹤表：OpenClaw 對 SaaS 企業受衝擊程度與特徵研究
 
-**最後更新日期**：2026-04-16
+**最後更新日期**：2026-05-05
 **當前研究狀態**：第三階段 - 可行性驗證執行 (In Progress)
 
 ---
@@ -39,8 +39,34 @@
   - 14 家樣本 companyfacts 已抓取，revenue / operating income tag 映射已擴充。
 - [x] **基礎報酬分析**
   - 已完成「樣本籃子 vs 三大指數」整段報酬、事件窗報酬與波動比較。
-- [ ] **特徵欄位品質檢查**
-  - 產出欄位缺值率、公司缺值清單與可用欄位保留建議。
+- [x] **特徵欄位品質檢查**
+  - 已完成欄位缺值率、公司缺值清單與欄位保留決策。
+  - 補完 `fcf_margin`（全樣本）、`ps_ratio`（9/14）、`market_cap`（9/14，含 DEI namespace fallback）。
+  - 發現 MNDY（Monday.com）為 6-K 申報人，XBRL revenue 底數與財務費用不一致，所有 margin 類欄位已 null。
+  - WDAY 無 GrossProfit / CostOfRevenue XBRL tag，gross_margin 結構性缺失。
+  - **欄位保留決策**（詳見下方）。
+### 欄位保留決策（2026-05-05 確定）
+
+| 欄位 | 有效筆數 | 決策 | 理由 |
+|------|---------|------|------|
+| `revenue_growth` | 14/14 | **進集群** | 完整可用，核心成長指標 |
+| `operating_margin` | 13/14 | **進集群** | MNDY 缺，13 家足夠；核心獲利指標 |
+| `rd_to_revenue` | 13/14 | **進集群** | MNDY 缺；反映研發投資強度 |
+| `sm_to_revenue` | 13/14 | **進集群** | MNDY 缺；反映 GTM 效率 |
+| `fcf_margin` | 13/14 | **進集群** | MNDY 缺；現金產出能力 |
+| `gross_margin` | 12/14 | **進集群（選用）** | MNDY + WDAY 缺；若用此欄位集群樣本降為 12 家 |
+| `market_cap` | 9/14 | **輔助描述** | 缺值太多（5/14），不進集群，用作群組描述 |
+| `ps_ratio` | 9/14 | **輔助描述** | 與 market_cap 高度相關，同上 |
+
+**集群分析建議設計**：
+- **主版本（Option A）**：5 欄（不含 gross_margin）× 13 家（不含 MNDY）
+- **次版本（Option B）**：6 欄（含 gross_margin）× 12 家（不含 MNDY + WDAY）
+- 優先執行 Option A，Option B 作穩健性確認
+
+**樣本決策**：
+- MNDY：僅用於市場衝擊分析（excess_return），不進集群財務特徵計算
+- 其餘 13 家：全部納入集群分析
+
 - [ ] **集群分析 prototype**
   - 以可用欄位完成第一次分群並檢查可解釋性。
 - [ ] **feasibility memo v2**

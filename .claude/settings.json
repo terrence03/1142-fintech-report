@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "auto",
+    "allow": [
+      "Bash(python *)",
+      "Bash(uv run *)",
+      "Bash(uv add *)",
+      "Bash(uv sync *)",
+      "Bash(uv pip *)",
+      "Bash(git *)",
+      "Read(./data/**)",
+      "Read(./src/**)",
+      "Read(./results/**)",
+      "Write(./data/**)",
+      "Write(./results/**)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)"
+    ]
+  }
+}

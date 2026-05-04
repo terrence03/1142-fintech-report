@@ -36,14 +36,21 @@ REVENUE_TAGS = [
 ]
 OPERATING_INCOME_TAGS = ["OperatingIncomeLoss", "IncomeLossFromOperations"]
 GROSS_PROFIT_TAGS = ["GrossProfit"]
+COST_OF_REVENUE_TAGS = ["CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfGoodsSold"]
 RD_EXPENSE_TAGS = ["ResearchAndDevelopmentExpense"]
 SM_EXPENSE_TAGS = ["SellingAndMarketingExpense"]
 SHARES_OUTSTANDING_TAGS = [
     "CommonStockSharesOutstanding",
     "EntityCommonStockSharesOutstanding",
 ]
+OCF_TAGS = ["NetCashProvidedByUsedInOperatingActivities"]
+CAPEX_TAGS = ["PaymentsToAcquirePropertyPlantAndEquipment"]
 
-VALID_FORMS = {"10-Q", "10-K", "10-Q/A", "10-K/A"}
+# 6-K/6-K/A included for foreign private issuers (e.g. Monday.com)
+VALID_FORMS = {"10-Q", "10-K", "10-Q/A", "10-K/A", "6-K", "6-K/A"}
+
+# Multipliers to annualize cumulative-from-fiscal-year-start figures
+_FP_ANNUALIZE = {"Q1": 4.0, "Q2": 2.0, "Q3": 4.0 / 3.0, "Q4": 1.0, "FY": 1.0}
 
 
 @dataclass(frozen=True)
@@ -199,6 +206,27 @@ def build_point_lookup(points: list[MetricPoint]) -> dict[tuple[pd.Timestamp, st
     return lookup
 
 
+def get_dei_shares(company_facts: dict, anchor: pd.Timestamp) -> float | None:
+    """Return most recent shares outstanding from the DEI namespace before anchor."""
+    dei = company_facts.get("facts", {}).get("dei", {})
+    tag = "EntityCommonStockSharesOutstanding"
+    if tag not in dei:
+        return None
+    rows = dei[tag].get("units", {}).get("shares", [])
+    valid = [
+        r for r in rows
+        if pd.to_datetime(r.get("end", "1900-01-01"), errors="coerce") <= anchor
+        and r.get("val", 0) > 0
+    ]
+    if not valid:
+        return None
+    latest = max(valid, key=lambda x: x["end"])
+    # only use if within 18 months of anchor to avoid stale data
+    if (anchor - pd.Timestamp(latest["end"])).days > 548:
+        return None
+    return float(latest["val"])
+
+
 def select_latest_period_metrics(company_facts: dict, anchor: pd.Timestamp) -> dict[str, float | None]:
     revenue_points = [p for p in iter_metric_points(company_facts, REVENUE_TAGS) if p.end <= anchor]
     revenue_points = sorted(revenue_points, key=lambda x: x.end, reverse=True)
@@ -209,14 +237,18 @@ def select_latest_period_metrics(company_facts: dict, anchor: pd.Timestamp) -> d
             "operating_margin": None,
             "rd_to_revenue": None,
             "sm_to_revenue": None,
+            "fcf_margin": None,
             "market_cap": None,
-            "ps_ratio": None,
+            "ttm_revenue": None,
         }
 
     gross_lookup = build_point_lookup(iter_metric_points(company_facts, GROSS_PROFIT_TAGS))
+    cost_lookup = build_point_lookup(iter_metric_points(company_facts, COST_OF_REVENUE_TAGS))
     op_lookup = build_point_lookup(iter_metric_points(company_facts, OPERATING_INCOME_TAGS))
     rd_lookup = build_point_lookup(iter_metric_points(company_facts, RD_EXPENSE_TAGS))
     sm_lookup = build_point_lookup(iter_metric_points(company_facts, SM_EXPENSE_TAGS))
+    ocf_lookup = build_point_lookup(iter_metric_points(company_facts, OCF_TAGS))
+    capex_lookup = build_point_lookup(iter_metric_points(company_facts, CAPEX_TAGS))
     shares_points = [p for p in iter_metric_points(company_facts, SHARES_OUTSTANDING_TAGS) if p.end <= anchor]
     shares_points = sorted(shares_points, key=lambda x: x.end, reverse=True)
 
@@ -235,19 +267,37 @@ def select_latest_period_metrics(company_facts: dict, anchor: pd.Timestamp) -> d
         return num / den
 
     revenue = selected.val
+    ttm_revenue = revenue * _FP_ANNUALIZE.get(selected.fp, 1.0)
+
     gross_profit = gross_lookup.get(selected_key)
+    if gross_profit is None:
+        # fallback: revenue - cost_of_revenue
+        cost = cost_lookup.get(selected_key)
+        if cost is not None:
+            gross_profit = revenue - cost
+
     operating_income = op_lookup.get(selected_key)
     rd_expense = rd_lookup.get(selected_key)
     sm_expense = sm_lookup.get(selected_key)
+
+    ocf = ocf_lookup.get(selected_key)
+    capex = capex_lookup.get(selected_key)
+    fcf: float | None = None
+    if ocf is not None and capex is not None:
+        fcf = ocf - capex
+    elif ocf is not None:
+        fcf = ocf
 
     revenue_growth = None
     if previous_revenue not in (None, 0):
         revenue_growth = (revenue / previous_revenue) - 1
 
-    shares = shares_points[0].val if shares_points else None
+    shares: float | None = shares_points[0].val if shares_points else None
+    if not shares or shares <= 0:
+        shares = get_dei_shares(company_facts, anchor)
     market_cap = None
     if shares and shares > 0:
-        market_cap = shares  # placeholder; multiplied by price later
+        market_cap = shares  # placeholder; multiplied by price in main()
 
     return {
         "revenue_growth": revenue_growth,
@@ -255,8 +305,9 @@ def select_latest_period_metrics(company_facts: dict, anchor: pd.Timestamp) -> d
         "operating_margin": safe_ratio(operating_income, revenue),
         "rd_to_revenue": safe_ratio(rd_expense, revenue),
         "sm_to_revenue": safe_ratio(sm_expense, revenue),
+        "fcf_margin": safe_ratio(fcf, ttm_revenue),
         "market_cap": market_cap,
-        "ps_ratio": None,
+        "ttm_revenue": ttm_revenue,
     }
 
 
@@ -345,16 +396,35 @@ def main() -> None:
 
         company_facts = json.loads(sec_path.read_text(encoding="utf-8"))
         ratios = select_latest_period_metrics(company_facts=company_facts, anchor=primary_anchor)
-        for col in ("revenue_growth", "gross_margin", "operating_margin", "rd_to_revenue", "sm_to_revenue"):
+        for col in ("revenue_growth", "gross_margin", "operating_margin", "rd_to_revenue", "sm_to_revenue", "fcf_margin"):
             df.at[idx, col] = to_pct(ratios[col]) if ratios[col] is not None else None
 
+        computed_market_cap: float | None = None
         if ratios["market_cap"] is not None and primary_window:
-            df.at[idx, "market_cap"] = round(
+            computed_market_cap = round(
                 float(ratios["market_cap"]) * float(primary_window["post_close"]),
                 3,
             )
+            df.at[idx, "market_cap"] = computed_market_cap
 
-        df.at[idx, "data_completeness_notes"] = f"benchmark={args.benchmark}"
+        ttm_revenue = ratios.get("ttm_revenue")
+        if computed_market_cap is not None and ttm_revenue:
+            df.at[idx, "ps_ratio"] = round(computed_market_cap / ttm_revenue, 4)
+
+        note_parts = [f"benchmark={args.benchmark}"]
+        # 6-K filers use a different revenue base in XBRL; nullify cross-tag derived ratios
+        sec_forms = {
+            row.get("form", "")
+            for facts_ns in company_facts.get("facts", {}).values()
+            for concept in facts_ns.values()
+            for unit_rows in concept.get("units", {}).values()
+            for row in unit_rows
+        }
+        if "6-K" in sec_forms or "6-K/A" in sec_forms:
+            for ratio_col in ("gross_margin", "operating_margin", "rd_to_revenue", "sm_to_revenue", "fcf_margin"):
+                df.at[idx, ratio_col] = None
+            note_parts.append("6-K filer: margin ratios nulled (XBRL revenue base mismatch)")
+        df.at[idx, "data_completeness_notes"] = "; ".join(note_parts)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
